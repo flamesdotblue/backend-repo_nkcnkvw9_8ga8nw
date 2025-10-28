@@ -1,8 +1,15 @@
 import os
-from fastapi import FastAPI
+from datetime import datetime, timedelta
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from pydantic import ValidationError
+from typing import Dict, Any
 
-app = FastAPI()
+from schemas import Booking
+from database import create_document
+
+app = FastAPI(title="Alankritha Naturals API")
 
 app.add_middleware(
     CORSMiddleware,
@@ -63,6 +70,68 @@ def test_database():
     response["database_name"] = "✅ Set" if os.getenv("DATABASE_NAME") else "❌ Not Set"
     
     return response
+
+
+def build_ics(booking: Booking) -> str:
+    """Generate a simple ICS calendar event string for the booking."""
+    start = booking.preferred_datetime
+    end = start + timedelta(hours=1)
+    start_str = start.strftime('%Y%m%dT%H%M%S')
+    end_str = end.strftime('%Y%m%dT%H%M%S')
+    now_str = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+    uid = f"booking-{start_str}-{booking.email}"
+    summary = f"Appointment: {booking.service} - Alankritha Naturals"
+    description = f"Name: {booking.name}\\nPhone: {booking.phone}\\nNotes: {booking.notes or ''}"
+    location = "Alankritha Naturals, Hyderabad"
+
+    ics = (
+        "BEGIN:VCALENDAR\n"
+        "VERSION:2.0\n"
+        "PRODID:-//Alankritha Naturals//Booking//EN\n"
+        "BEGIN:VEVENT\n"
+        f"UID:{uid}\n"
+        f"DTSTAMP:{now_str}\n"
+        f"DTSTART:{start_str}\n"
+        f"DTEND:{end_str}\n"
+        f"SUMMARY:{summary}\n"
+        f"DESCRIPTION:{description}\n"
+        f"LOCATION:{location}\n"
+        "END:VEVENT\n"
+        "END:VCALENDAR\n"
+    )
+    return ics
+
+@app.post("/api/book")
+async def create_booking(payload: Dict[str, Any]):
+    """
+    Create a booking document and return success state with optional ICS content.
+    Expects ISO datetime string for preferred_datetime.
+    """
+    try:
+        # Convert preferred_datetime to datetime if provided as string
+        if isinstance(payload.get("preferred_datetime"), str):
+            try:
+                payload["preferred_datetime"] = datetime.fromisoformat(payload["preferred_datetime"])  # type: ignore
+            except Exception:
+                raise HTTPException(status_code=400, detail="Invalid preferred_datetime format. Use ISO 8601.")
+
+        booking = Booking(**payload)
+    except ValidationError as e:
+        raise HTTPException(status_code=422, detail=e.errors())
+
+    try:
+        booking_id = create_document("booking", booking)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+
+    # Build ICS for download
+    ics = build_ics(booking)
+    return JSONResponse({
+        "status": "success",
+        "message": "Appointment confirmed — we’ll call to confirm the time.",
+        "booking_id": booking_id,
+        "ics": ics,
+    })
 
 
 if __name__ == "__main__":
